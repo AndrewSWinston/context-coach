@@ -1,0 +1,5 @@
+.DS_Store
+*.local.json
+test_transcript*.txt
+measure_overhead.py
+.claude/
