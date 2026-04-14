@@ -11,7 +11,7 @@
  * TODO: Implement global spend cap on the backend — hard $ ceiling, not just per-user rate limit
  */
 
-const BACKEND_URL = null; // e.g. "https://your-app.railway.app/summarize"
+const BACKEND_URL = null;
 
 // Free summaries per month when routing through your backend (your cost).
 // BYOK mode (BACKEND_URL = null) uses the user's own key — no limit needed.
@@ -19,12 +19,20 @@ const FREE_LIMIT = 10;
 
 const SYSTEM_PROMPT = `You are a conversation summariser. Given a chat transcript, produce a compact summary the user can paste at the start of a NEW chat to restore context efficiently.
 
-Format:
-- 3-5 bullet points covering: main topic, key decisions or findings, open questions, next steps
-- Max 200 words total
-- Write in second person ("You were working on…", "You decided…")
-- End with: "Continue from: [one sentence stating exactly where the conversation left off]"
-- Do not mention which AI model or platform the conversation took place on`;
+Use exactly this format:
+
+We've been working on: [1–2 sentences on the task and goal]
+
+Key decisions and findings:
+• [point]
+• [point]
+• [point]
+
+Critical context: [constraints, requirements, or background the new chat must have]
+
+Where we left off: [the specific next question or decision we were about to tackle — not just the topic, but the actionable next step]
+
+Under 150 words. Do not add commentary before or after the summary block.`;
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
@@ -48,18 +56,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     // ── Route through backend proxy ───────────────────────────────────────────
     if (BACKEND_URL) {
-      chrome.storage.local.get(["summarizeCount", "summarizeMonth"], async (data) => {
+      chrome.storage.local.get(["summarizeCount", "summarizeMonth", "userId"], async (data) => {
         const thisMonth = new Date().toISOString().slice(0, 7);
         const count = data.summarizeMonth === thisMonth ? (data.summarizeCount || 0) : 0;
         if (count >= FREE_LIMIT) {
           sendResponse({ error: "limit_reached" });
           return;
         }
+        // Generate a persistent userId if not yet created
+        let userId = data.userId;
+        if (!userId) {
+          userId = crypto.randomUUID();
+          chrome.storage.local.set({ userId });
+        }
         try {
           const response = await fetch(BACKEND_URL, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ text, systemPrompt: SYSTEM_PROMPT }),
+            body: JSON.stringify({ userId, transcript: text, platform: message.platform || "claude" }),
           });
           if (!response.ok) {
             const err = await response.json().catch(() => ({}));

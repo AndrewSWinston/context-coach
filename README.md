@@ -11,7 +11,8 @@ Every AI query re-sends your full conversation history. Long chats silently accu
 - **Status banner** — persistent green/yellow/red health indicator injected into the chat UI
 - **Session total** — cumulative tokens burned since you opened the tab (grows quadratically — this is the number that maps to your bill)
 - **Project knowledge detection** — detects files loaded into Claude Projects (instructions, documents, books) and estimates their token cost. These are injected into every API call and can be the largest hidden cost in a conversation. No competitor extension currently detects these.
-- **Summarize + Start Fresh** — one click compresses your chat via Claude Haiku and opens a new tab with the summary pre-loaded, so you can continue without the baggage
+- **✏️ Summarize Prompt** — injects a crafted summary prompt directly into your current chat and auto-submits it. The model summarizes itself using its full context — no API key needed, zero cost. When the summary is ready, a **📋 Copy to New Chat** button appears: one click copies the summary and opens a fresh tab with it pre-loaded.
+- **📋 AI Summary** — alternative flow for power users: sends your conversation to Claude Haiku and opens a new tab with the summary pre-loaded. Requires an API key (BYOK) or a paid plan.
 - **Breakdown** — popup shows split between conversation text, project knowledge files, PDFs, images, Word docs, and presentations
 - **Multi-platform** — works on both [claude.ai](https://claude.ai) and [chatgpt.com](https://chatgpt.com)
 
@@ -41,11 +42,17 @@ The extension is not yet on the Chrome Web Store. Install manually:
 
 **Note:** If you update `manifest.json` (e.g. adding permissions), you need to remove and re-add the extension — a simple reload won't pick up permission changes.
 
-## Summarize button
+## Summarize buttons
 
-The Summarize feature compresses your conversation via Claude Haiku and opens a new chat with the summary pre-loaded. It includes 10 free summaries per month.
+ContextCoach offers two paths to starting a fresh chat with context intact:
 
-For unlimited use, you can supply your own Anthropic API key (~$0.001/click): click the extension icon, paste your key (`sk-ant-...`) in the field at the bottom, and click **Save**. The key is stored locally in `chrome.storage.local` — never sent anywhere except directly to `api.anthropic.com`.
+**✏️ Summarize Prompt (recommended)** — injects a structured summary prompt into your current chat and auto-submits it. The model summarizes its own conversation using full context — no API key required, no cost. When the response finishes, a **📋 Copy to New Chat** button appears. One click copies the summary and opens a fresh tab with it pre-loaded.
+
+The injected prompt asks the model to produce: what you were working on, key decisions and findings, critical context, and the specific next question or decision to tackle (not just the topic). The model ends its response with `[SUMMARY COMPLETE]` so the extension knows exactly when to capture it.
+
+Note: if you were editing a document, copy the latest version manually before switching tabs — the summary covers the discussion, not the artifact. If you're working in a Claude or ChatGPT Project, open your new chat there to keep project knowledge loaded.
+
+**📋 AI Summary** — sends a sample of your conversation to Claude Haiku via the Anthropic API and opens a new tab with the result. Requires your own API key (~$0.001/click). Add it via the extension popup.
 
 ## How it works
 
@@ -79,6 +86,8 @@ That means long conversations still degrade response quality and still consume s
 ## How is this different from other token counter extensions?
 
 Several good token monitoring extensions exist — most focus on counting tokens or tracking rate-limit quota via character-based estimation. ContextCoach focuses on a different problem: not how many tokens you've used, but what you should do about it — behavioral guidance, a one-click workflow to start fresh, project knowledge file detection, and energy/efficiency framing.
+
+The summarize workflow is also architecturally different: other extensions reconstruct context by extracting and scoring text fragments from the DOM (picking messages that look important based on keywords or bullet points). ContextCoach's "Summarize Prompt" asks the model to summarize itself — using its full context, not a fragment — producing a coherent handoff that captures decisions made, open questions, and the specific next step. For long, complex sessions (the cases that actually need a new chat), this difference is significant.
 
 ## License
 

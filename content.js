@@ -460,6 +460,51 @@ function summarizeConversation(conversationText, buttonEl, resultEl) {
   }
 }
 
+// ─── Inject Summary Prompt ───────────────────────────────────────────────────
+
+const SUMMARY_PROMPT = `Summarize this conversation so I can continue in a new chat without losing context. I'll paste your response as my first message there. Use exactly this format:
+
+We've been working on: [1–2 sentences on the task and goal]
+
+Key decisions and findings:
+• [point]
+• [point]
+• [point]
+
+Critical context: [constraints, requirements, or background the new chat must have]
+
+Where we left off: [the specific next question or decision we were about to tackle — not just the topic, but the actionable next step]
+
+Under 150 words. Do not add commentary before or after the summary block. End your response with the exact text: [SUMMARY COMPLETE]`;
+
+function injectPromptIntoChat(resultEl) {
+  const input = document.querySelector('div[contenteditable="true"]')
+    || document.querySelector('textarea[placeholder]')
+    || document.querySelector('div[role="textbox"]');
+
+  if (!input) {
+    if (resultEl) resultEl.textContent = "⚠ Couldn't find the input box — click in the chat first.";
+    return;
+  }
+
+  input.focus();
+  if (input.tagName === "TEXTAREA") {
+    input.value = SUMMARY_PROMPT;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  } else {
+    input.innerHTML = "";
+    document.execCommand("insertText", false, SUMMARY_PROMPT);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  // Auto-submit after a short delay so React can register the input
+  setTimeout(() => {
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", keyCode: 13, bubbles: true }));
+  }, 150);
+
+  if (resultEl) resultEl.textContent = "✅ Summary prompt sent — copy the response and paste into a new chat.";
+}
+
 // ─── Banner ───────────────────────────────────────────────────────────────────
 
 const BANNER_ID = "context-coach-banner";
@@ -521,7 +566,8 @@ function injectBanner(tokens, threshold, conversationText, textTokens, imageToke
           <span style="font-size:12px;opacity:0.95;">${bannerMessage}</span>
           ${showSavings ? `<span style="font-size:12px;opacity:0.9;">Starting fresh would cut processing and energy use by ~${savingsPercent}%</span>` : ""}
         </div>
-        ${showNewChatButton ? `<button id="context-coach-summarize" style="
+        ${showNewChatButton ? `
+        <button id="context-coach-inject-prompt" style="
           background: rgba(255,255,255,0.25);
           border: none;
           color: white;
@@ -530,7 +576,17 @@ function injectBanner(tokens, threshold, conversationText, textTokens, imageToke
           padding: 2px 10px;
           border-radius: 4px;
           white-space: nowrap;
-        ">📋 New Chat</button>` : ""}
+        ">✏️ Summarize Prompt</button>
+        <button id="context-coach-summarize" style="
+          background: rgba(255,255,255,0.25);
+          border: none;
+          color: white;
+          font-size: 12px;
+          cursor: pointer;
+          padding: 2px 10px;
+          border-radius: 4px;
+          white-space: nowrap;
+        ">📋 AI Summary</button>` : ""}
         <button id="context-coach-dismiss" style="
           background: rgba(255,255,255,0.25);
           border: none;
@@ -573,6 +629,86 @@ function injectBanner(tokens, threshold, conversationText, textTokens, imageToke
   }
 
   if (showNewChatButton) {
+    const injectBtn = document.getElementById("context-coach-inject-prompt");
+    const result = document.getElementById("context-coach-result");
+
+    // Restore button state if poll is already running or complete
+    if (summaryPollResult === "waiting") {
+      injectBtn.disabled = true;
+      injectBtn.textContent = "⏳ Waiting…";
+      result.textContent = "✅ Summary prompt sent — waiting for response…";
+    } else if (summaryPollResult === "ready") {
+      injectBtn.textContent = "📋 Copy to New Chat";
+      result.textContent = "✅ Summary ready. If you were editing a document, copy the latest version too. If you're in a Claude or ChatGPT Project, open your new chat there instead.";
+    }
+
+    injectBtn.addEventListener("click", () => {
+      // If summary is ready, do the copy+open
+      if (summaryPollResult === "ready" && summaryText) {
+        navigator.clipboard.writeText(summaryText).catch(() => {});
+        if (chrome.runtime?.id) {
+          try { chrome.runtime.sendMessage({ type: "OPEN_NEW_CHAT", summary: summaryText, platform: PLATFORM }); } catch(e) {}
+        }
+        summaryPollResult = null;
+        summaryText = null;
+        return;
+      }
+
+      // Otherwise start the inject + poll flow
+      const userTurnsBefore = document.querySelectorAll(CONFIG.userSelector).length;
+      injectPromptIntoChat(document.getElementById("context-coach-result"));
+      summaryPollResult = "waiting";
+      injectBtn.disabled = true;
+      injectBtn.textContent = "⏳ Waiting…";
+      document.getElementById("context-coach-result").textContent = "✅ Summary prompt sent — waiting for response…";
+
+      if (summaryPoll) clearInterval(summaryPoll);
+
+      const SENTINEL = "[SUMMARY COMPLETE]";
+      summaryPoll = setInterval(() => {
+        const userTurns = document.querySelectorAll(CONFIG.userSelector);
+        if (userTurns.length <= userTurnsBefore) return;
+
+        const assistantBlocks = document.querySelectorAll(CONFIG.assistantSelector);
+        if (assistantBlocks.length === 0) return;
+        // Search all blocks for sentinel — last block may be a UI element, not response text
+        const matchingBlock = [...assistantBlocks].reverse().find(b => b.innerText.includes(SENTINEL));
+        if (!matchingBlock) return;
+        const currentText = matchingBlock.innerText || "";
+
+        if (currentText.includes(SENTINEL)) {
+          clearInterval(summaryPoll);
+          summaryPoll = null;
+          // Wait 1.5s after sentinel appears to let streaming finish
+          setTimeout(() => {
+            const finalBlock = [...document.querySelectorAll(CONFIG.assistantSelector)]
+              .reverse().find(b => b.innerText.includes(SENTINEL));
+            summaryText = finalBlock ? finalBlock.innerText.replace(SENTINEL, "").trim() : currentText.replace(SENTINEL, "").trim();
+            summaryPollResult = "ready";
+
+            // Update button — find it fresh in case banner redrawed
+            const btn = document.getElementById("context-coach-inject-prompt");
+            const res = document.getElementById("context-coach-result");
+            if (btn) { btn.disabled = false; btn.textContent = "📋 Copy to New Chat"; }
+            if (res) res.textContent = "✅ Summary ready. If you were editing a document, copy the latest version too. If you're in a Claude or ChatGPT Project, open your new chat there instead.";
+          }, 5000);
+        }
+      }, 800);
+
+      // Timeout after 90 seconds
+      setTimeout(() => {
+        if (summaryPollResult === "waiting") {
+          clearInterval(summaryPoll);
+          summaryPoll = null;
+          summaryPollResult = null;
+          const btn = document.getElementById("context-coach-inject-prompt");
+          const res = document.getElementById("context-coach-result");
+          if (btn) { btn.disabled = false; btn.textContent = "✏️ Summarize Prompt"; }
+          if (res) res.textContent = "⚠ Timed out — copy the summary manually, then open a new chat.";
+        }
+      }, 90000);
+    });
+
     document.getElementById("context-coach-summarize").addEventListener("click", () => {
       const btn = document.getElementById("context-coach-summarize");
       const result = document.getElementById("context-coach-result");
@@ -597,6 +733,9 @@ function injectBanner(tokens, threshold, conversationText, textTokens, imageToke
 let lastTokenCount = 0;
 let lastDismissedAtTier = null;
 let lastSummary = null; // persists across banner redraws
+let summaryPoll = null; // active sentinel poll — survives banner redraws
+let summaryPollResult = null; // "waiting" | "ready" | null — drives button state on redraw
+let summaryText = null; // captured summary text once sentinel fires
 let sessionTotalTokens = 0;  // running sum of context load per turn, since page load
 let lastAssistantTurnCount = 0; // tracks # of assistant messages to detect new turns
 let isExact = false;          // true once SSE provides real counts (future); false = estimate
