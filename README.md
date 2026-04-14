@@ -40,6 +40,10 @@ The extension is not yet on the Chrome Web Store. Install manually:
 4. Click **Load unpacked** and select the extension folder
 5. Open [claude.ai](https://claude.ai) or [chatgpt.com](https://chatgpt.com) — the badge and banner will appear
 
+**What works immediately (no setup):** The banner, token counts, and ✏️ Summarize Prompt → 📋 Copy to New Chat flow all work out of the box with no API key.
+
+**What requires an API key:** The 📋 AI Summary button sends your conversation to Claude Haiku and requires your own Anthropic API key (~$0.001/click). Add it by clicking the extension icon and entering your key in the popup. Get a key at [console.anthropic.com](https://console.anthropic.com). Most users won't need this — the Summarize Prompt flow works better for long complex sessions anyway.
+
 **Note:** If you update `manifest.json` (e.g. adding permissions), you need to remove and re-add the extension — a simple reload won't pick up permission changes.
 
 ## Summarize buttons
