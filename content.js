@@ -41,27 +41,13 @@ const IMAGE_TOKENS_PER_MEGAPIXEL = 1600;
 const IMAGE_DEFAULT_MEGAPIXELS = 2.0;
 const SYSTEM_OVERHEAD_TOKENS = CONFIG.systemOverhead;
 
-// Thresholds fetched from remote config so they can be updated without a
-// Chrome Web Store review. Falls back to hardcoded defaults if fetch fails.
-// TODO: replace null with your config endpoint URL when backend is deployed.
-// e.g. "https://your-app.railway.app/config"
-const REMOTE_CONFIG_URL = null;
-
-let THRESHOLDS = [
+// Thresholds are applied to CONTROLLABLE tokens (total minus system overhead
+// and project knowledge). Green < 10K, Yellow 10K–20K, Red ≥ 20K.
+const THRESHOLDS = [
   { limit: 10000,  color: "#22c55e", dot: "🟢", label: "Light",    message: "Context is light — keep going." },
   { limit: 20000,  color: "#f59e0b", dot: "🟡", label: "Moderate", message: "Context is growing — start fresh if the topic has shifted." },
   { limit: Infinity, color: "#ef4444", dot: "🔴", label: "Heavy",  message: "Chat is expensive & energy-heavy — start a new chat." },
 ];
-
-// Fetch remote config once on load (non-blocking — uses defaults until resolved)
-if (REMOTE_CONFIG_URL) {
-  fetch(REMOTE_CONFIG_URL)
-    .then(r => r.json())
-    .then(config => {
-      if (Array.isArray(config.thresholds)) THRESHOLDS = config.thresholds;
-    })
-    .catch(() => { /* silently use defaults */ });
-}
 
 // ─── Display helpers ─────────────────────────────────────────────────────────
 // Round to nearest thousand for display — avoids false precision on estimates
@@ -81,26 +67,28 @@ function countTokens(text) {
   return tokens ? tokens.length : 0;
 }
 
-// ─── Attachment pattern matching (ported from token_estimator.py) ─────────────
+// ─── Attachment pattern matching (text-based fallback) ───────────────────────
+// Catches uploads that DOM detection misses: PDF text extracted into the chat,
+// references to attachments in tool output, and any platform (e.g. ChatGPT)
+// where we don't have reliable DOM chip selectors. The Math.max merge in
+// analyze() prevents double-counting against DOM detection.
 
 const PDF_PATTERNS = [
-  /(?<![\/\w])[\w\-]+\.pdf\b/gi,  // .pdf filename only — excludes URL paths (no preceding / or word char)
-  /\[PDF[^\]]*\]/gi,               // [PDF...] markers in transcript text
-  /I(?:'ve)?\s+uploaded\s+(?:a\s+)?pdf/gi,   // explicit user upload statements
+  /(?<![\/\w])[\w\-]+\.pdf\b/gi,
+  /\[PDF[^\]]*\]/gi,
+  /I(?:'ve)?\s+uploaded\s+(?:a\s+)?pdf/gi,
   /I(?:'ve)?\s+attached\s+(?:a\s+)?pdf/gi,
 ];
 
 const DOCX_PATTERNS = [
-  /(?<![\/\w])[\w\-]+\.docx?\b/gi, // .doc or .docx filename, excludes URL paths
+  /(?<![\/\w])[\w\-]+\.docx?\b/gi,
 ];
 
 const PPTX_PATTERNS = [
-  /(?<![\/\w])[\w\-]+\.pptx?\b/gi, // .ppt or .pptx filename, excludes URL paths
+  /(?<![\/\w])[\w\-]+\.pptx?\b/gi,
 ];
 
 // Conservative minimums — actual load is likely higher
-// docx: ~3,000 tokens (text-heavy doc default)
-// pptx: ~3,200 tokens (treated as one image slide at 2MP default)
 const DOCX_TOKENS_DEFAULT = 3000;
 const PPTX_TOKENS_DEFAULT = 3200;
 
@@ -250,7 +238,7 @@ function countConversationImages() {
 // Default token estimates per file type when page count is unknown.
 // PDF default is deliberately high — underestimating file load is worse than
 // overestimating, since the whole point is to warn users about hidden cost.
-const PDF_TOKENS_DEFAULT = 25000;  // ~12 pages assumed; real PDFs often much larger
+const PDF_TOKENS_DEFAULT = 30000;  // ~15 pages assumed; real PDFs vary enormously (a full book is 10x+)
 
 // Token estimate for text-based project knowledge files (md, txt, csv, etc.)
 // ~18 tokens per line is a reasonable average for natural language + markdown.
@@ -272,37 +260,53 @@ function countDOMAttachments() {
   // SCOPE: Only count chips inside the conversation area, not project knowledge
   // panel chips. Conversation chips are inside [data-testid] containers that
   // are descendants of the main conversation thread.
-  const thumbs = document.querySelectorAll('div.group\\/thumbnail');
+  // Badge-first detection: Claude's chip wrapper class has changed over time
+  // (was div.group/thumbnail). The badge p.uppercase.truncate is the most stable
+  // marker for a file chip. Walk up from the badge to the nearest containing
+  // button (the chip's clickable region) to identify the chip.
+  const badges = document.querySelectorAll('p.uppercase.truncate');
   const uniqueFiles = new Map(); // "type:filename" → count
 
-  thumbs.forEach(t => {
-    const badge = t.querySelector('p.uppercase.truncate');
-    if (!badge) return;
+  badges.forEach(badge => {
     const type = badge.textContent.trim().toLowerCase();
     if (!BINARY_DOC_TYPES.has(type)) return;
+
+    // Find the chip container: nearest ancestor button, or fallback to the
+    // badge's grandparent (chip wrapper). Use whichever exists.
+    const btn = badge.closest('button') || badge.parentElement?.parentElement;
+    const t = btn || badge;
 
     // Skip project knowledge panel chips — they sit inside the project sidebar,
     // not inside conversation turn containers. Project panel chips are handled
     // separately by countProjectFiles().
     if (isProjectPanelChip(t)) return;
 
-    const btn = t.querySelector('button');
-    const fullText = btn ? btn.textContent.trim() : '';
-    const name = fullText.replace(new RegExp(type + '$', 'i'), '').trim();
+    // Extract filename from h3 inside the chip button (preferred) or from
+    // button text minus the badge suffix.
+    const h3 = btn?.querySelector('h3');
+    let name = h3 ? h3.textContent.trim() : '';
+    if (!name && btn) {
+      const fullText = btn.textContent.trim();
+      name = fullText.replace(new RegExp(type + '$', 'i'), '').trim();
+    }
     const normalizedType = type.startsWith('doc') ? 'docx' : type.startsWith('ppt') ? 'pptx' : type;
 
-    // Named files: group by type:filename, count will be halved for echo dedup.
-    // Unnamed files: group all under type:unnamed — total count halved gives file count.
-    const key = normalizedType + ':' + (name || 'unnamed');
+    // Dedup by filename across the whole DOM. Same file echoed in user + assistant
+    // turns collapses to one entry. Unnamed chips fall through to occurrence-counted
+    // bucket and get halved at tally time.
+    const key = normalizedType + ':' + (name ? name.toLowerCase() : '__unnamed__');
     uniqueFiles.set(key, (uniqueFiles.get(key) || 0) + 1);
   });
 
-  // Tally by type, halving each file's count (min 1) to account for echo duplication
+  // Named files count once each; unnamed bucket is halved (echo dedup).
   const files = { pdf: 0, docx: 0, pptx: 0 };
   for (const [key, count] of uniqueFiles) {
     const type = key.split(':')[0];
-    if (files[type] !== undefined) {
+    if (files[type] === undefined) continue;
+    if (key.endsWith(':__unnamed__')) {
       files[type] += Math.ceil(count / 2);
+    } else {
+      files[type] += 1;
     }
   }
 
@@ -324,30 +328,30 @@ function countDOMAttachments() {
 // contains filename, type, and line count — e.g. "AW_Challenge_Prompt.md, md, 61 lines"
 
 function isProjectPanelChip(el) {
-  // Project knowledge chips live in the project sidebar/panel, NOT inside
-  // conversation message containers. Heuristic: if the chip is NOT a descendant
-  // of a conversation turn container, it's a project file.
-  // Conversation turns use .!font-user-message (user) or .font-claude-response (assistant).
-  // Also check for common conversation thread containers.
-  const inConversation = el.closest('.\\!font-user-message') ||
-    el.closest('.font-claude-response') ||
-    el.closest('[data-testid="conversation-turn"]') ||
-    el.closest('[data-testid="chat-message"]');
-  return !inConversation;
+  // Project knowledge chips have an aria-label with line/word count metadata,
+  // e.g. "AW_Challenge_Prompt.md, md, 61 lines". Conversation attachment chips
+  // (PDF/DOCX uploads in the chat) have no aria-label or no line/word count.
+  // This is more reliable than DOM-position heuristics, since Claude's
+  // conversation container classes change over time.
+  const btn = el.tagName === 'BUTTON' ? el : el.closest('button');
+  if (!btn) return false;
+  const aria = btn.getAttribute('aria-label') || '';
+  return /\d+\s+(lines?|words?)/i.test(aria);
 }
 
 function countProjectFiles() {
-  const thumbs = document.querySelectorAll('div.group\\/thumbnail');
+  // Badge-first detection (see countDOMAttachments comment above).
+  const badges = document.querySelectorAll('p.uppercase.truncate');
   const projectFiles = [];  // { name, type, lines, tokens }
   let totalTokens = 0;
   const seen = new Set();  // deduplicate by filename
 
-  thumbs.forEach(t => {
+  badges.forEach(badge => {
+    const btn = badge.closest('button');
+    if (!btn) return;
+    const t = btn;
     // Only count project panel chips (not conversation attachments)
     if (!isProjectPanelChip(t)) return;
-
-    const btn = t.querySelector('button');
-    if (!btn) return;
     const ariaLabel = btn.getAttribute('aria-label') || '';
 
     // Parse aria-label: "filename.ext, ext, N lines" or "filename.ext, ext, N words"
@@ -356,8 +360,7 @@ function countProjectFiles() {
     if (!filename || seen.has(filename)) return;
     seen.add(filename);
 
-    const badge = t.querySelector('p.uppercase.truncate');
-    const type = badge ? badge.textContent.trim().toLowerCase() : '';
+    const type = badge.textContent.trim().toLowerCase();
 
     // Extract line/word count from aria-label
     let lineCount = 0;
@@ -406,61 +409,10 @@ function getThreshold(tokens, fixedOverhead) {
   return THRESHOLDS.find(t => controllableTokens < t.limit);
 }
 
-// ─── Haiku Summarise ─────────────────────────────────────────────────────────
-
-function summarizeConversation(conversationText, buttonEl, resultEl) {
-  buttonEl.disabled = true;
-  buttonEl.textContent = "Summarising…";
-  resultEl.textContent = "";
-
-  if (!chrome.runtime?.id) {
-    resultEl.textContent = "⚠ Extension context lost — reload the page.";
-    buttonEl.disabled = false;
-    buttonEl.textContent = "📋 New Chat";
-    return;
-  }
-
-  try {
-    chrome.runtime.sendMessage({ type: "GET_SUMMARY", text: conversationText }, (response) => {
-      if (chrome.runtime.lastError) {
-        resultEl.textContent = "⚠ Extension error — reload the page.";
-        buttonEl.disabled = false;
-        buttonEl.textContent = "📋 New Chat";
-        return;
-      }
-
-      if (response.error) {
-        const msg = response.error === "limit_reached"
-          ? "You've used your 10 free summaries this month. Click the extension icon → Upgrade for unlimited."
-          : `⚠ ${response.error}`;
-        lastSummary = { error: msg };
-        resultEl.textContent = msg;
-        buttonEl.disabled = false;
-        buttonEl.textContent = "📋 New Chat";
-        return;
-      }
-
-      lastSummary = { summary: response.summary };
-      // Copy to clipboard
-      navigator.clipboard.writeText(response.summary).catch(() => {});
-      // Open new claude.ai tab — content script there will inject the summary
-      if (chrome.runtime?.id) {
-        try {
-          chrome.runtime.sendMessage({ type: "OPEN_NEW_CHAT", summary: response.summary, platform: PLATFORM });
-        } catch(e) {}
-      }
-      resultEl.textContent = "✅ Opening new chat with summary…";
-      buttonEl.textContent = "📋 New Chat";
-      buttonEl.disabled = false;
-    });
-  } catch(e) {
-    resultEl.textContent = `⚠ ${e.message}`;
-    buttonEl.disabled = false;
-    buttonEl.textContent = "📋 New Chat";
-  }
-}
-
 // ─── Inject Summary Prompt ───────────────────────────────────────────────────
+// [The direct-to-Haiku "AI Summary" path and BYOK API-key flow were removed
+//  2026-04-14 for beta simplicity. See tag v0.1.0-pre-trim or session log 13
+//  to restore when a paid backend tier goes live.]
 
 const SUMMARY_PROMPT = `Summarize this conversation so I can continue in a new chat without losing context. I'll paste your response as my first message there. Use exactly this format:
 
@@ -517,15 +469,13 @@ function removeBanner() {
 function injectBanner(tokens, threshold, conversationText, textTokens, imageTokens) {
   removeBanner();
 
-  const countLabel = isExact ? "actual" : "est.";
-  const contextFormatted = isExact ? tokens.toLocaleString() : roundK(tokens);
-  const sessionFormatted = isExact ? sessionTotalTokens.toLocaleString() : roundK(sessionTotalTokens);
+  const contextFormatted = roundK(tokens);
+  const sessionFormatted = roundK(sessionTotalTokens);
   // Show "New Chat" button on yellow and red banners. On yellow, the conversation
   // may be short but project knowledge or attachments are driving the load — users
   // should still have the option to start fresh. Only gate summarization (the API
   // call) on having enough text, not the button itself.
   const showNewChatButton = threshold.label === "Moderate" || threshold.label === "Heavy";
-  const canSummarize = textTokens >= 2000;
 
   // Override message when images dominate the load
   const imageHeavy = imageTokens > 0 && imageTokens > (tokens * 0.5);
@@ -576,17 +526,7 @@ function injectBanner(tokens, threshold, conversationText, textTokens, imageToke
           padding: 2px 10px;
           border-radius: 4px;
           white-space: nowrap;
-        ">✏️ Summarize Prompt</button>
-        <button id="context-coach-summarize" style="
-          background: rgba(255,255,255,0.25);
-          border: none;
-          color: white;
-          font-size: 12px;
-          cursor: pointer;
-          padding: 2px 10px;
-          border-radius: 4px;
-          white-space: nowrap;
-        ">📋 AI Summary</button>` : ""}
+        ">✏️ Summarize Prompt</button>` : ""}
         <button id="context-coach-dismiss" style="
           background: rgba(255,255,255,0.25);
           border: none;
@@ -613,20 +553,6 @@ function injectBanner(tokens, threshold, conversationText, textTokens, imageToke
     removeBanner();
     lastDismissedAtTier = threshold.label;
   });
-
-  // Restore any prior summary so it survives banner redraws
-  if (lastSummary) {
-    const resultEl = document.getElementById("context-coach-result");
-    if (lastSummary.error) {
-      resultEl.textContent = `⚠ ${lastSummary.error}`;
-    } else {
-      resultEl.textContent = "✅ Summary copied to clipboard — paste into a new chat.";
-      if (showNewChatButton) {
-        const btn = document.getElementById("context-coach-summarize");
-        if (btn) btn.textContent = "📋 New Chat";
-      }
-    }
-  }
 
   if (showNewChatButton) {
     const injectBtn = document.getElementById("context-coach-inject-prompt");
@@ -709,22 +635,6 @@ function injectBanner(tokens, threshold, conversationText, textTokens, imageToke
       }, 90000);
     });
 
-    document.getElementById("context-coach-summarize").addEventListener("click", () => {
-      const btn = document.getElementById("context-coach-summarize");
-      const result = document.getElementById("context-coach-result");
-      if (canSummarize) {
-        // Enough conversation text to generate a useful summary
-        summarizeConversation(conversationText, btn, result);
-      } else {
-        // Not enough text to summarize — just open a blank new chat
-        if (chrome.runtime?.id) {
-          try {
-            chrome.runtime.sendMessage({ type: "OPEN_NEW_CHAT", summary: null, platform: PLATFORM });
-          } catch(e) {}
-        }
-        result.textContent = "Opening new chat…";
-      }
-    });
   }
 }
 
@@ -732,13 +642,11 @@ function injectBanner(tokens, threshold, conversationText, textTokens, imageToke
 
 let lastTokenCount = 0;
 let lastDismissedAtTier = null;
-let lastSummary = null; // persists across banner redraws
 let summaryPoll = null; // active sentinel poll — survives banner redraws
 let summaryPollResult = null; // "waiting" | "ready" | null — drives button state on redraw
 let summaryText = null; // captured summary text once sentinel fires
 let sessionTotalTokens = 0;  // running sum of context load per turn, since page load
 let lastAssistantTurnCount = 0; // tracks # of assistant messages to detect new turns
-let isExact = false;          // true once SSE provides real counts (future); false = estimate
 
 function analyze() {
   const text = getConversationText();
@@ -746,7 +654,8 @@ function analyze() {
 
   const textTokens = countTokens(text);
 
-  // Text-pattern detection (catches uploaded files referenced by name in conversation)
+  // Text-pattern detection (catches PDF text extractions, attachment mentions
+  // in tool output, and uploads on platforms without reliable DOM chip selectors)
   const textAttach = countAttachmentTokens(text);
 
   // DOM-based detection (catches file chips the text-regex misses)
@@ -755,10 +664,10 @@ function analyze() {
   // Project knowledge file detection (files in Claude Projects — injected every turn)
   const projectData = countProjectFiles();
 
-  // DOM image detection (catches Claude-generated images, uses actual dimensions)
+  // DOM image detection (uses actual image dimensions where available)
   const { count: domImageCount, tokens: domImageTokens } = countConversationImages();
 
-  // Use whichever detection method found more for each type
+  // Use whichever detection method found more for each type (Math.max prevents double-count)
   const imageCount = Math.max(domImageCount, textAttach.imageCount);
   const imageTokens = domImageCount > textAttach.imageCount ? domImageTokens : textAttach.imageTokens;
   const pdfCount = Math.max(textAttach.pdfCount, domAttach.domPdfCount);
@@ -828,7 +737,6 @@ function analyze() {
           projectFileTokens: projectData.projectFileTokens,
           projectFileCount: projectData.projectFileCount,
           sessionTotal: sessionTotalTokens,
-          isExact,
           threshold: threshold.label,
           message: threshold.message,
           color: threshold.color,
@@ -932,7 +840,7 @@ if (chrome.runtime?.id) {
         docxTokens, docxCount, pptxTokens, pptxCount,
         projectFileTokens: projectData.projectFileTokens,
         projectFileCount: projectData.projectFileCount,
-        sessionTotal: sessionTotalTokens, isExact,
+        sessionTotal: sessionTotalTokens,
         threshold: threshold.label, message: threshold.message,
         color: threshold.color, dot: threshold.dot,
         timestamp: Date.now(),

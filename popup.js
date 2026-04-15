@@ -1,6 +1,10 @@
 /**
  * popup.js — ContextCoach
  * Reads stored token data and renders the popup UI.
+ *
+ * [API-key input, usage-count display, and upgrade-modal handlers were
+ *  removed 2026-04-14 along with the Haiku summarize path. See tag
+ *  v0.1.0-pre-trim or session log 13 to restore if needed.]
  */
 
 if (chrome.runtime?.id) {
@@ -31,7 +35,7 @@ if (chrome.runtime?.id) {
           docxTokens = 0, docxCount = 0,
           pptxTokens = 0, pptxCount = 0,
           projectFileTokens = 0, projectFileCount = 0,
-          sessionTotal = 0, isExact = false,
+          sessionTotal = 0,
           threshold, message, color, dot,
           timestamp,
         } = tokenData;
@@ -40,16 +44,15 @@ if (chrome.runtime?.id) {
           if (n < 1000) return "< 1,000";
           return (Math.round(n / 1000) * 1000).toLocaleString();
         }
-        const formatted = isExact ? total.toLocaleString() : "~" + roundK(total);
-        const sessionFormatted = isExact ? sessionTotal.toLocaleString() : "~" + roundK(sessionTotal);
-        const countLabel = isExact ? "actual" : "est.";
+        const formatted = "~" + roundK(total);
+        const sessionFormatted = "~" + roundK(sessionTotal);
         const ago = timestamp ? timeAgo(timestamp) : "";
         const platformName = isChatGPT ? "ChatGPT" : "Claude";
 
         container.innerHTML = `
           <div class="status-block">
             <div style="font-size:11px;opacity:0.5;margin-bottom:4px;text-transform:uppercase;letter-spacing:0.05em">${platformName}</div>
-            <div class="token-count">${formatted} <span style="font-size:12px;font-weight:400;opacity:0.6">tokens ${countLabel}</span></div>
+            <div class="token-count">${formatted} <span style="font-size:12px;font-weight:400;opacity:0.6">tokens est.</span></div>
             <div class="token-label">context load — next query</div>
             <div class="token-count" style="font-size:18px;margin-top:6px">${sessionFormatted}</div>
             <div class="token-label">session total (since opened)</div>
@@ -101,83 +104,6 @@ if (chrome.runtime?.id) {
     });
   } catch (e) { /* extension context invalidated — silently skip */ }
 }
-
-// ─── API Key Management ───────────────────────────────────────────────────────
-
-if (chrome.runtime?.id) {
-  try {
-    // Load saved key (show masked if present)
-    chrome.storage.local.get("anthropicApiKey", ({ anthropicApiKey }) => {
-      if (anthropicApiKey) {
-        document.getElementById("api-key-input").value = anthropicApiKey;
-        document.getElementById("api-key-status").textContent = "✓ Key saved";
-      }
-    });
-  } catch(e) {}
-}
-
-document.getElementById("api-key-save").addEventListener("click", () => {
-  const key = document.getElementById("api-key-input").value.trim();
-  const status = document.getElementById("api-key-status");
-  if (!key.startsWith("sk-ant-")) {
-    status.style.color = "#ef4444";
-    status.textContent = "Invalid key format";
-    return;
-  }
-  if (chrome.runtime?.id) {
-    try {
-      chrome.storage.local.set({ anthropicApiKey: key }, () => {
-        status.style.color = "#22c55e";
-        status.textContent = "✓ Key saved";
-      });
-    } catch(e) {}
-  }
-});
-
-// ─── Usage count display ─────────────────────────────────────────────────────
-
-if (chrome.runtime?.id) {
-  try {
-    chrome.runtime.sendMessage({ type: "GET_SUMMARY_COUNT" }, ({ count = 0, limit = 10, backendLive = false } = {}) => {
-      const el = document.getElementById("usage-count");
-      const apiSection = document.getElementById("api-key-section");
-      if (!el) return;
-
-      if (!backendLive) {
-        // Dev/BYOK mode — show API key field, hide upgrade section usage framing
-        el.textContent = "Using your own API key (dev mode)";
-      } else {
-        // Backend live — hide API key section entirely, show usage count
-        if (apiSection) apiSection.style.display = "none";
-        if (count >= limit) {
-          el.textContent = `${count} of ${limit} used this month — upgrade for unlimited`;
-          el.style.color = "#ef4444";
-          document.getElementById("upgrade-btn").classList.add("live");
-        } else {
-          el.textContent = `${count} of ${limit} free this month`;
-          if (count >= limit - 2) el.style.color = "#f59e0b"; // warn on last 2
-        }
-      }
-    });
-  } catch(e) {}
-}
-
-// ─── Upgrade modal ───────────────────────────────────────────────────────────
-
-document.getElementById("upgrade-btn").addEventListener("click", () => {
-  document.getElementById("upgrade-modal").classList.add("visible");
-});
-
-document.getElementById("modal-close").addEventListener("click", () => {
-  document.getElementById("upgrade-modal").classList.remove("visible");
-});
-
-// Click outside modal to dismiss
-document.getElementById("upgrade-modal").addEventListener("click", (e) => {
-  if (e.target === e.currentTarget) {
-    e.currentTarget.classList.remove("visible");
-  }
-});
 
 function timeAgo(ts) {
   const seconds = Math.round((Date.now() - ts) / 1000);

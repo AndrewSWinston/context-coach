@@ -11,8 +11,7 @@ Every AI query re-sends your full conversation history. Long chats silently accu
 - **Status banner** — persistent green/yellow/red health indicator injected into the chat UI
 - **Session total** — cumulative tokens burned since you opened the tab (grows quadratically — this is the number that maps to your bill)
 - **Project knowledge detection** — detects files loaded into Claude Projects (instructions, documents, books) and estimates their token cost. These are injected into every API call and can be the largest hidden cost in a conversation. No competitor extension currently detects these.
-- **✏️ Summarize Prompt** — injects a crafted summary prompt directly into your current chat and auto-submits it. The model summarizes itself using its full context — no API key needed, zero cost. When the summary is ready, a **📋 Copy to New Chat** button appears: one click copies the summary and opens a fresh tab with it pre-loaded.
-- **📋 AI Summary** — alternative flow for power users: sends your conversation to Claude Haiku and opens a new tab with the summary pre-loaded. Requires an API key (BYOK) or a paid plan.
+- **✏️ Summarize Prompt → 📋 Copy to New Chat** — when context gets heavy, click Summarize Prompt. The extension drops a structured summary prompt into your current chat and auto-submits it. The model summarizes itself using its full context — no API key, no cost, no backend. When the summary finishes, the button changes to Copy to New Chat: one click copies the summary and opens a fresh tab with it pre-loaded as your first message.
 - **Breakdown** — popup shows split between conversation text, project knowledge files, PDFs, images, Word docs, and presentations
 - **Multi-platform** — works on both [claude.ai](https://claude.ai) and [chatgpt.com](https://chatgpt.com)
 
@@ -40,30 +39,26 @@ The extension is not yet on the Chrome Web Store. Install manually:
 4. Click **Load unpacked** and select the extension folder
 5. Open [claude.ai](https://claude.ai) or [chatgpt.com](https://chatgpt.com) — the badge and banner will appear
 
-**What works immediately (no setup):** The banner, token counts, and ✏️ Summarize Prompt → 📋 Copy to New Chat flow all work out of the box with no API key.
-
-**What requires an API key:** The 📋 AI Summary button sends your conversation to Claude Haiku and requires your own Anthropic API key (~$0.001/click). Add it by clicking the extension icon and entering your key in the popup. Get a key at [console.anthropic.com](https://console.anthropic.com). Most users won't need this — the Summarize Prompt flow works better for long complex sessions anyway.
+No API key required, no sign-in, no backend call. The banner, token counts, and ✏️ Summarize Prompt → 📋 Copy to New Chat flow all work out of the box.
 
 **Note:** If you update `manifest.json` (e.g. adding permissions), you need to remove and re-add the extension — a simple reload won't pick up permission changes.
 
-## Summarize buttons
+## How the Summarize workflow works
 
-ContextCoach offers two paths to starting a fresh chat with context intact:
-
-**✏️ Summarize Prompt (recommended)** — injects a structured summary prompt into your current chat and auto-submits it. The model summarizes its own conversation using full context — no API key required, no cost. When the response finishes, a **📋 Copy to New Chat** button appears. One click copies the summary and opens a fresh tab with it pre-loaded.
+Click **✏️ Summarize Prompt** on the yellow or red banner. The extension drops a structured summary prompt into your chat's input box and auto-submits it. The model summarizes its own conversation using full context — no API key required, no cost, nothing sent to a third-party server.
 
 The injected prompt asks the model to produce: what you were working on, key decisions and findings, critical context, and the specific next question or decision to tackle (not just the topic). The model ends its response with `[SUMMARY COMPLETE]` so the extension knows exactly when to capture it.
 
-Note: if you were editing a document, copy the latest version manually before switching tabs — the summary covers the discussion, not the artifact. If you're working in a Claude or ChatGPT Project, open your new chat there to keep project knowledge loaded.
+When the response finishes, the button changes to **📋 Copy to New Chat**. One click copies the summary and opens a fresh tab with it pre-loaded as your first message.
 
-**📋 AI Summary** — sends a sample of your conversation to Claude Haiku via the Anthropic API and opens a new tab with the result. Requires your own API key (~$0.001/click). Add it via the extension popup.
+Note: if you were editing a document, copy the latest version manually before switching tabs — the summary covers the discussion, not the artifact. If you're working in a Claude or ChatGPT Project, open your new chat there to keep project knowledge loaded.
 
 ## How it works
 
 Token counting is estimation, not exact measurement. The extension reads the chat DOM and builds an estimate from several components:
 
 - **Conversation text** — word-level BPE approximation of user and assistant turns. This is the most accurate component.
-- **Uploaded files** — PDFs, images, Word docs, and presentations are detected and assigned conservative token estimates. The extension can't read the files or determine page counts, so these are rough.
+- **Uploaded files** — PDFs, images, Word docs, and presentations are detected and assigned conservative token estimates. The extension can't read the files or determine page counts, so these are rough. **PDFs vary enormously**: the default assumes ~15 pages (~30K tokens). A short whitepaper may be a few thousand tokens; a full book can be 150K+. If you load large documents, real context load may be much higher than the badge shows.
 - **Project knowledge files** — files loaded into Claude Projects are detected and estimated separately. These are injected into every API call within a project and can be the largest hidden cost in a conversation.
 - **System overhead** — a fixed estimate for the platform's invisible server-side injection (tool schemas, safety rules, memory, etc.): ~15,000 tokens on Claude, ~4,000 on ChatGPT.
 
@@ -74,7 +69,6 @@ All counts are rounded to the nearest thousand and prefixed with `~` to be upfro
 - [ ] Energy equivalencies — convert tokens to kWh with real-world context
 - [ ] Web search detection — estimate tokens injected by search snippet results
 - [ ] Claude Desktop / native app support (research in progress)
-- [ ] Paid tier with unlimited summaries
 - [ ] Web Store publication
 
 ## FAQ
