@@ -11,7 +11,7 @@ Every AI query re-sends your full conversation history. Long chats silently accu
 - **Status banner** — persistent green/yellow/red health indicator injected into the chat UI
 - **Session total** — cumulative tokens burned since you opened the tab (grows quadratically — this is the number that maps to your bill)
 - **Project knowledge detection** — detects files loaded into Claude Projects (instructions, documents, books) and estimates their token cost. These are injected into every API call and can be the largest hidden cost in a conversation. No competitor extension currently detects these.
-- **✏️ Summarize Prompt → 📋 Copy to New Chat** — when context gets heavy, click Summarize Prompt. The extension drops a structured summary prompt into your current chat and auto-submits it. The model summarizes itself using its full context — no API key, no cost, no backend. When the summary finishes, the button changes to Copy to New Chat: one click copies the summary and opens a fresh tab with it pre-loaded as your first message.
+- **✏️ Summarize Prompt → 📋 Copy to New Chat** — when context gets heavy, click Summarize Prompt. The extension drops a structured summary prompt into your current chat and auto-submits it. The model summarizes itself using its full context. When the summary finishes, the button changes to Copy to New Chat: one click copies the summary and opens a fresh tab with it pre-loaded as your first message.
 - **Breakdown** — popup shows split between conversation text, project knowledge files, PDFs, images, Word docs, and presentations
 - **Multi-platform** — works on both [claude.ai](https://claude.ai) and [chatgpt.com](https://chatgpt.com)
 
