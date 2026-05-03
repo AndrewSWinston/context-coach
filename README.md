@@ -1,10 +1,10 @@
 # ContextCoach
 
-A Chrome extension that estimates your token context load on Claude and ChatGPT — and tells you when to start a new chat.
+A Chrome extension that estimates your token context load on Claude and ChatGPT — and helps you summarize your current chat and start a new one.
 
 ## What it does
 
-Every AI query re-sends your full conversation history. Long chats silently accumulate cost and degrade response quality. This extension surfaces that load in real time.
+Every AI query re-sends your full conversation history. Long chats silently accumulate significant cost, processing, and energy use...and degrade response quality. This extension surfaces that load in real time.
 
 **Features:**
 - **Context load badge** — token estimate on the extension icon, updated after every turn

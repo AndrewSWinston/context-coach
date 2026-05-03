@@ -17,10 +17,13 @@ const PLATFORM_CONFIG = {
     systemOverhead: 15000,
     // Selector pairs: [userSelector, assistantSelector]
     // .\\!font-user-message = user turn container (confirmed April 2026)
-    // .font-claude-response = assistant content (multiple per turn — used for text, not turn count)
+    // .font-claude-response = standard assistant text (confirmed April 2026)
+    // .font-claude-response-body = web search result text (confirmed April 2026 — different class, same role)
     userSelector: '.\\!font-user-message',
-    assistantSelector: '.font-claude-response',
-    imgSelectors: ['.\\!font-user-message img', '.font-claude-response img'],
+    assistantSelector: '.font-claude-response, .font-claude-response-body',
+    // Only count images in USER turns — assistant-side images are UI thumbnails (search results,
+    // article previews) that are not injected into Claude's context window as image tokens.
+    imgSelectors: ['.\\!font-user-message img'],
   },
   chatgpt: {
     name: 'ChatGPT',
@@ -28,7 +31,8 @@ const PLATFORM_CONFIG = {
     systemOverhead: 4000,
     userSelector: '[data-message-author-role="user"]',
     assistantSelector: '[data-message-author-role="assistant"]',
-    imgSelectors: ['[data-message-author-role="user"] img', '[data-message-author-role="assistant"] img'],
+    // Only count images in USER turns — same rationale as Claude config above.
+    imgSelectors: ['[data-message-author-role="user"] img'],
   },
 };
 
@@ -185,6 +189,7 @@ function getConversationText() {
   const assistantEls = document.querySelectorAll(CONFIG.assistantSelector);
   userEls.forEach(el => { text += el.innerText + "\n"; });
   assistantEls.forEach(el => { text += el.innerText + "\n"; });
+
   return text;
 }
 
@@ -218,15 +223,9 @@ function countConversationImages() {
     });
   }
 
-  // Fallback if no conversation container matched
-  if (count === 0) {
-    document.querySelectorAll('img').forEach(img => {
-      if (seen.has(img)) return;
-      seen.add(img);
-      const t = estimateImgTokens(img);
-      if (t > 0) { totalTokens += t; count++; }
-    });
-  }
+  // NOTE: page-wide img fallback removed — it captured UI thumbnails from search results
+  // (e.g. 1920x1005 Reuters article previews) that are not in Claude's context window.
+  // Only images inside known conversation selectors are counted.
 
   return { count, tokens: totalTokens };
 }
@@ -291,28 +290,42 @@ function countDOMAttachments() {
     }
     const normalizedType = type.startsWith('doc') ? 'docx' : type.startsWith('ppt') ? 'pptx' : type;
 
+    // For PDFs, try to extract page count from the chip text.
+    // Claude renders page count as e.g. "24 pages" somewhere in the chip button text.
+    let pageCount = 0;
+    if (normalizedType === 'pdf' && btn) {
+      const chipText = btn.textContent || '';
+      const pageMatch = chipText.match(/(\d+)\s+pages?/i);
+      if (pageMatch) pageCount = parseInt(pageMatch[1]);
+    }
+
     // Dedup by filename across the whole DOM. Same file echoed in user + assistant
     // turns collapses to one entry. Unnamed chips fall through to occurrence-counted
     // bucket and get halved at tally time.
     const key = normalizedType + ':' + (name ? name.toLowerCase() : '__unnamed__');
-    uniqueFiles.set(key, (uniqueFiles.get(key) || 0) + 1);
+    const existing = uniqueFiles.get(key) || { count: 0, pageCount: 0 };
+    uniqueFiles.set(key, { count: existing.count + 1, pageCount: Math.max(existing.pageCount, pageCount) });
   });
 
   // Named files count once each; unnamed bucket is halved (echo dedup).
   const files = { pdf: 0, docx: 0, pptx: 0 };
-  for (const [key, count] of uniqueFiles) {
+  let totalPdfTokens = 0;
+  for (const [key, { count, pageCount }] of uniqueFiles) {
     const type = key.split(':')[0];
     if (files[type] === undefined) continue;
-    if (key.endsWith(':__unnamed__')) {
-      files[type] += Math.ceil(count / 2);
-    } else {
-      files[type] += 1;
+    const fileCount = key.endsWith(':__unnamed__') ? Math.ceil(count / 2) : 1;
+    files[type] += fileCount;
+    if (type === 'pdf') {
+      // Use page-aware estimate if we got a page count: 2,000 tokens/page (midpoint of
+      // Anthropic's published 1,500–3,000 range). Fall back to PDF_TOKENS_DEFAULT.
+      const tokensPerFile = pageCount > 0 ? pageCount * 2000 : PDF_TOKENS_DEFAULT;
+      totalPdfTokens += fileCount * tokensPerFile;
     }
   }
 
   return {
     domPdfCount: files.pdf,
-    domPdfTokens: files.pdf * PDF_TOKENS_DEFAULT,
+    domPdfTokens: totalPdfTokens || files.pdf * PDF_TOKENS_DEFAULT,
     domDocxCount: files.docx,
     domDocxTokens: files.docx * DOCX_TOKENS_DEFAULT,
     domPptxCount: files.pptx,
@@ -414,7 +427,9 @@ function getThreshold(tokens, fixedOverhead) {
 //  2026-04-14 for beta simplicity. See tag v0.1.0-pre-trim or session log 13
 //  to restore when a paid backend tier goes live.]
 
-const SUMMARY_PROMPT = `Summarize this conversation so I can continue in a new chat without losing context. I'll paste your response as my first message there. Use exactly this format:
+const SUMMARY_PROMPT = `I'm starting a new chat and need you to summarize this conversation so I can paste your response as my first message there. The goal is to give the new chat enough context to continue seamlessly.
+
+Use exactly this format:
 
 We've been working on: [1–2 sentences on the task and goal]
 
@@ -427,7 +442,11 @@ Critical context: [constraints, requirements, or background the new chat must ha
 
 Where we left off: [the specific next question or decision we were about to tackle — not just the topic, but the actionable next step]
 
-Under 150 words. Do not add commentary before or after the summary block. End your response with the exact text: [SUMMARY COMPLETE]`;
+Key phrases or passages: [3–5 terms, names, quotes, or short passages from this conversation that carry meaning a paraphrase would lose — jargon, proper nouns, code snippets, specific numbers, or verbatim lines the new chat needs to recognize]
+
+If we were editing a draft (article, post, email, code, or document), append the full latest version below the summary block under the heading: LATEST DRAFT:
+
+Under 200 words for the summary block (excluding any appended draft). Do not add commentary before or after. End your response with the exact text: [SUMMARY COMPLETE]`;
 
 function injectPromptIntoChat(resultEl) {
   const input = document.querySelector('div[contenteditable="true"]')
@@ -466,7 +485,7 @@ function removeBanner() {
   if (existing) existing.remove();
 }
 
-function injectBanner(tokens, threshold, conversationText, textTokens, imageTokens) {
+function injectBanner(tokens, threshold, conversationText, textTokens, imageTokens, pdfTokens) {
   removeBanner();
 
   const contextFormatted = roundK(tokens);
@@ -477,10 +496,13 @@ function injectBanner(tokens, threshold, conversationText, textTokens, imageToke
   // call) on having enough text, not the button itself.
   const showNewChatButton = threshold.label === "Moderate" || threshold.label === "Heavy";
 
-  // Override message when images dominate the load
+  // Override message when a specific content type dominates the load
   const imageHeavy = imageTokens > 0 && imageTokens > (tokens * 0.5);
+  const pdfHeavy = pdfTokens > 0 && pdfTokens > (tokens * 0.4);
   const bannerMessage = imageHeavy
     ? "Images are driving the load — normal for image chats. Start a new chat for new topics."
+    : pdfHeavy
+    ? "Loaded documents are driving the processing cost. Starting a new chat won't help much — try uploading only the pages you need."
     : threshold.message;
 
   // Savings estimate: how much processing a fresh chat would avoid
@@ -510,7 +532,7 @@ function injectBanner(tokens, threshold, conversationText, textTokens, imageToke
 
   banner.innerHTML = `
     <div style="display:flex; align-items:flex-start; justify-content:space-between;">
-      <span style="white-space:nowrap;">${threshold.dot} <strong>~${contextFormatted} tokens</strong> &nbsp;·&nbsp; session: <strong>~${sessionFormatted}</strong></span>
+      <span id="context-coach-token-count" style="white-space:nowrap;">${threshold.dot} <strong>~${contextFormatted} tokens</strong> &nbsp;·&nbsp; session: <strong>~${sessionFormatted}</strong></span>
       <div style="display:flex; align-items:center; gap:10px;">
         <div style="display:flex; flex-direction:column; align-items:flex-end; gap:2px;">
           <span style="font-size:12px;opacity:0.95;">${bannerMessage}</span>
@@ -605,7 +627,7 @@ function injectBanner(tokens, threshold, conversationText, textTokens, imageToke
         if (currentText.includes(SENTINEL)) {
           clearInterval(summaryPoll);
           summaryPoll = null;
-          // Wait 1.5s after sentinel appears to let streaming finish
+          // Wait 9s after sentinel appears to let streaming finish (longer for draft appends)
           setTimeout(() => {
             const finalBlock = [...document.querySelectorAll(CONFIG.assistantSelector)]
               .reverse().find(b => b.innerText.includes(SENTINEL));
@@ -617,7 +639,7 @@ function injectBanner(tokens, threshold, conversationText, textTokens, imageToke
             const res = document.getElementById("context-coach-result");
             if (btn) { btn.disabled = false; btn.textContent = "📋 Copy to New Chat"; }
             if (res) res.textContent = "✅ Summary ready. If you were editing a document, copy the latest version too. If you're in a Claude or ChatGPT Project, open your new chat there instead.";
-          }, 5000);
+          }, 9000);
         }
       }, 800);
 
@@ -714,7 +736,12 @@ function analyze() {
   if (tierChanged) lastDismissedAtTier = null; // reset dismiss on tier change
 
   if (lastDismissedAtTier !== threshold.label) {
-    injectBanner(total, threshold, text, textTokens, imageTokens);
+    injectBanner(total, threshold, text, textTokens, imageTokens, pdfTokens);
+  } else {
+    // Tier hasn't changed but token count may have — update the displayed number in-place
+    // without a full banner redraw (avoids re-injection loop and preserves dismiss state)
+    const tokenEl = document.getElementById("context-coach-token-count");
+    if (tokenEl) tokenEl.innerHTML = `${threshold.dot} <strong>~${roundK(total)} tokens</strong> &nbsp;·&nbsp; session: <strong>~${roundK(sessionTotalTokens)}</strong>`;
   }
 
   lastTokenCount = total;
